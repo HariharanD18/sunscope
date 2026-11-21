@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SunScope – Live Solar Planner</title>
+<style>
+  /* ===== CHANGE YOUR DESIGN HERE ===== */
+  :root{
+    --bg:#0b1220; --card:#131c2e; --line:#223049; --text:#e8eefc; --muted:#8fa0c0;
+    --accent:#fbbf24; --accent2:#34d399; --radius:14px; --font:system-ui,Segoe UI,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);padding:20px}
+  .wrap{max-width:1000px;margin:auto}
+  header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+  h1{margin:0;font-size:28px} h1 span{color:var(--accent)}
+  .muted{color:var(--muted);font-size:13px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-top:14px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-top:14px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+  .stat b{display:block;font-size:26px;color:var(--accent);margin-top:4px}
+  .stat.g b{color:var(--accent2)}
+  label{font-size:12px;color:var(--muted);display:block;margin-bottom:3px}
+  input{background:#0b1220;border:1px solid var(--line);color:var(--text);padding:8px;border-radius:8px;width:100%;font:inherit}
+  button{background:var(--accent);color:#1a1300;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer}
+  button.alt{background:#1f2b44;color:var(--text)}
+  .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;align-items:end}
+  canvas{width:100%;height:260px;display:block}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  td,th{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+  td input{width:80px;padding:5px}
+  .best{color:var(--accent2);font-weight:600}
+  .live{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--accent2);margin-right:6px;animation:p 1.5s infinite}
+  @keyframes p{50%{opacity:.25}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>☀️ Sun<span>Scope</span></h1>
+      <div class="muted"><span class="live"></span><span id="place">Locating…</span> · <span id="clock"></span></div>
+    </div>
+    <div class="muted" id="updated"></div>
+  </header>
+
+  <div class="card">
+    <div class="row">
+      <div><label>Latitude</label><input id="lat" type="number" step="0.0001" value="20.5937"></div>
+      <div><label>Longitude</label><input id="lon" type="number" step="0.0001" value="78.9629"></div>
+      <div><label>Panel size (kW)</label><input id="kw" type="number" step="0.1" value="3"></div>
+      <div><label>Grid CO₂ (kg per kWh)</label><input id="co2" type="number" step="0.01" value="0.82"></div>
+      <div><button id="gps">📍 Use my location</button></div>
+      <div><button class="alt" id="go">Update now</button></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="stat"><span class="muted">Sunlight now</span><b id="sNow">–</b></div>
+    <div class="stat"><span class="muted">Power output now</span><b id="sPow">–</b></div>
+    <div class="stat g"><span class="muted">Today's energy</span><b id="sToday">–</b></div>
+    <div class="stat g"><span class="muted">Tomorrow's forecast</span><b id="sTom">–</b></div>
+    <div class="stat g"><span class="muted">CO₂ saved today</span><b id="sCo2">–</b></div>
+    <div class="stat"><span class="muted">Cloud cover</span><b id="sCloud">–</b></div>
+  </div>
+
+  <div class="card">
+    <b>Next 24 hours: expected solar power (kW)</b>
+    <canvas id="chart"></canvas>
+  </div>
+
+  <div class="card">
+    <b>⚡ Best time to run your appliances on free solar power</b>
+    <div class="muted" style="margin:4px 0 8px">Edit power (kW) and run time (hours) to match your home.</div>
+    <table>
+      <thead><tr><th>Appliance</th><th>kW</th><th>Hours</th><th>Best start</th><th>Solar covered</th></tr></thead>
+      <tbody id="apps"></tbody>
+    </table>
+  </div>
+  <p class="muted">Data: Open-Meteo (live). Output estimate = panel kW × sunlight ÷ 1000 × 0.75 efficiency, with a heat-loss correction.</p>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const APPLIANCES = [
+  { n: 'Washing machine', kw: 0.5, h: 1 },
+  { n: 'Water pump', kw: 0.75, h: 2 },
+  { n: 'Iron box', kw: 1, h: 1 },
+  { n: 'Phone / laptop charging', kw: 0.1, h: 3 },
+  { n: 'Geyser', kw: 2, h: 1 },
+  { n: 'EV scooter charging', kw: 1.5, h: 3 },
+];
+
+let hours = [];   // [{t:'2026-11-20T14:00', gen:kW, rad, temp}]
+let nowIdx = 0;
+
+function buildApps() {
+  $('apps').innerHTML = APPLIANCES.map((a, i) => `
+    <tr><td>${a.n}</td>
+    <td><input type="number" step="0.05" value="${a.kw}" data-i="${i}" data-f="kw"></td>
+    <td><input type="number" step="1" min="1" max="8" value="${a.h}" data-i="${i}" data-f="h"></td>
+    <td id="bs${i}">–</td><td id="bc${i}">–</td></tr>`).join('');
+  $('apps').querySelectorAll('input').forEach((el) =>
+    el.oninput = () => { APPLIANCES[el.dataset.i][el.dataset.f] = +el.value; schedule(); });
+}
+
+async function load() {
+  const lat = $('lat').value, lon = $('lon').value;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+    `&current=temperature_2m,cloud_cover,shortwave_radiation` +
+    `&hourly=shortwave_radiation,temperature_2m&forecast_days=3&timezone=auto`;
+  try {
+    const d = await (await fetch(url)).json();
+    const kw = +$('kw').value;
+    const gen = (rad, temp) => {
+      const cell = temp + rad * 0.03;
+      const derate = 1 - 0.004 * Math.max(0, cell - 25);
+      return Math.max(0, kw * (rad / 1000) * 0.75 * derate);
+    };
+    hours = d.hourly.time.map((t, i) => ({
+      t, rad: d.hourly.shortwave_radiation[i], temp: d.hourly.temperature_2m[i],
+      gen: gen(d.hourly.shortwave_radiation[i], d.hourly.temperature_2m[i])
+    }));
+    const key = d.current.time.slice(0, 13);
+    nowIdx = Math.max(0, hours.findIndex((h) => h.t.startsWith(key)));
+    const c = d.current;
+    const nowGen = gen(c.shortwave_radiation, c.temperature_2m);
+    const day = (offset) => {
+      const base = hours[nowIdx].t.slice(0, 10);
+      const dt = new Date(base); dt.setDate(dt.getDate() + offset);
+      const k = dt.toISOString().slice(0, 10);
+      return hours.filter((h) => h.t.startsWith(k)).reduce((s, h) => s + h.gen, 0);
+    };
+    const today = day(0);
+    $('sNow').textContent = Math.round(c.shortwave_radiation) + ' W/m²';
+    $('sPow').textContent = nowGen.toFixed(2) + ' kW';
+    $('sToday').textContent = today.toFixed(1) + ' kWh';
+    $('sTom').textContent = day(1).toFixed(1) + ' kWh';
+    $('sCo2').textContent = (today * +$('co2').value).toFixed(1) + ' kg';
+    $('sCloud').textContent = c.cloud_cover + '%';
+    $('updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+    draw(); schedule();
+  } catch (e) { $('updated').textContent = 'Could not load data. Check internet.'; }
+}
+
+function draw() {
+  const cv = $('chart'), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
+  const data = hours.slice(nowIdx, nowIdx + 24);
+  const max = Math.max(0.5, ...data.map((h) => h.gen)) * 1.15;
+  const bw = (W - 40) / data.length;
+  ctx.font = '11px sans-serif'; ctx.fillStyle = '#8fa0c0'; ctx.strokeStyle = '#223049';
+  for (let i = 0; i <= 4; i++) {
+    const y = 10 + (H - 40) * (1 - i / 4);
+    ctx.beginPath(); ctx.moveTo(32, y); ctx.lineTo(W, y); ctx.stroke();
+    ctx.fillText((max * i / 4).toFixed(1), 0, y + 4);
+  }
+  data.forEach((h, i) => {
+    const bh = (H - 40) * (h.gen / max), x = 36 + i * bw, y = 10 + (H - 40) - bh;
+    ctx.fillStyle = i === 0 ? '#34d399' : '#fbbf24';
+    ctx.fillRect(x + 2, y, bw - 4, bh);
+    if (i % 3 === 0) { ctx.fillStyle = '#8fa0c0'; ctx.fillText(h.t.slice(11, 13) + 'h', x, H - 8); }
+  });
+}
+
+function schedule() {
+  APPLIANCES.forEach((a, i) => {
+    let best = { s: -1, c: -1 };
+    for (let s = 0; s + a.h <= 24; s++) {
+      let cov = 0;
+      for (let k = 0; k < a.h; k++) cov += Math.min(hours[nowIdx + s + k]?.gen || 0, a.kw);
+      const pct = cov / (a.kw * a.h);
+      if (pct > best.c + 0.001) best = { s, c: pct };
+    }
+    const h = hours[nowIdx + best.s];
+    $('bs' + i).innerHTML = h ? `<span class="best">${h.t.slice(11, 16)}</span> ${best.s === 0 ? '(now)' : ''}` : '–';
+    $('bc' + i).textContent = Math.round(Math.max(0, best.c) * 100) + '%';
+  });
+}
+
+$('gps').onclick = () => navigator.geolocation.getCurrentPosition((p) => {
+  $('lat').value = p.coords.latitude.toFixed(4); $('lon').value = p.coords.longitude.toFixed(4);
+  $('place').textContent = 'Your location'; load();
+}, () => alert('Location blocked. Type latitude and longitude instead.'));
+$('go').onclick = load;
+['kw', 'co2'].forEach((id) => $(id).oninput = load);
+window.addEventListener('resize', () => hours.length && draw());
+
+setInterval(() => $('clock').textContent = new Date().toLocaleString(), 1000);
+setInterval(load, 10 * 60 * 1000); // auto-refresh every 10 minutes
+buildApps();
+$('place').textContent = 'Set your location';
+if (navigator.geolocation) $('gps').click();
+else load();
+load();
+</script>
+</body>
+</html>
